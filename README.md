@@ -13,6 +13,7 @@ Convert SVG-based glyph drawings to UFO's GLIF format.
 - Configurable units-per-em scaling
 - Unicode codepoint assignment
 - Proper coordinate system conversion (SVG top-left to UFO baseline)
+- **Anchor extraction from SVG text elements** - Text nodes in your SVG are automatically converted to anchor points in the GLIF file, useful for defining attachment points for diacritics and other mark positioning
 - Both library and CLI interfaces
 
 ## Installation
@@ -82,6 +83,22 @@ let glyph = convert_svg_string_to_glyph(
 )?;
 ```
 
+## Anchor Points
+
+SVG text elements are automatically converted to GLIF anchors. The text content becomes the anchor name, and the position is determined by the text element's transform. This is particularly useful for defining attachment points for mark positioning in fonts.
+
+For example, an SVG text element like:
+```xml
+<g transform="translate(250, 700)">
+  <text>top</text>
+</g>
+```
+
+Will be converted to a GLIF anchor:
+```xml
+<anchor x="250" y="800" name="top"/>
+```
+
 ## Limitations
 
 - Only processes `<path>` elements (shapes like circles, rectangles must be converted to paths)
@@ -91,5 +108,3 @@ let glyph = convert_svg_string_to_glyph(
 ## License
 
 MIT
-
-

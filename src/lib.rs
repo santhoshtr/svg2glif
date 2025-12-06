@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use norad::{Codepoints, Contour, ContourPoint, Glyph, PointType};
+use norad::{Anchor, Codepoints, Contour, ContourPoint, Glyph, Name, PointType};
 use std::fs;
 use std::path::Path;
 use usvg::Node;
@@ -66,8 +66,9 @@ pub fn convert_svg_string_to_glyph(
     svg_path: &Path,
     config: &ConversionConfig,
 ) -> Result<Glyph> {
-    let opt = usvg::Options::default();
-    let rtree = usvg::Tree::from_str(svg_data, &opt).context("parsing svg")?;
+    let mut options = usvg::Options::default();
+    options.fontdb_mut().load_system_fonts();
+    let rtree = usvg::Tree::from_str(svg_data, &options).context("parsing svg")?;
 
     // Get SVG dimensions
     let svg_size = rtree.size();
@@ -92,25 +93,17 @@ pub fn convert_svg_string_to_glyph(
     glyph.height = advance_height as f64;
 
     // Add unicode if provided
-    if let Some(ref unicode_hex) = config.unicode {
-        if let Ok(codepoint) = u32::from_str_radix(unicode_hex, 16) {
-            if let Some(c) = char::from_u32(codepoint) {
-                let codepoints = Codepoints::new([c]);
-                glyph.codepoints = codepoints;
-            }
-        }
+    if let Some(ref unicode_hex) = config.unicode
+        && let Ok(codepoint) = u32::from_str_radix(unicode_hex, 16)
+        && let Some(c) = char::from_u32(codepoint)
+    {
+        let codepoints = Codepoints::new([c]);
+        glyph.codepoints = codepoints;
     }
 
     // Process paths
     for node in rtree.root().children() {
-        if let Node::Path(ref path) = *node {
-            let contours = process_path(path, svg_height, config.descent, scale);
-            if !glyph.contours.is_empty() {
-                glyph.contours.extend(contours);
-            } else {
-                glyph.contours = contours;
-            }
-        }
+        process_node(node, &mut glyph, svg_height, config.descent, scale);
     }
 
     Ok(glyph)
@@ -142,6 +135,30 @@ pub fn convert_svg_to_glif_file(
     let glif_data = glyph.encode_xml()?;
     fs::write(glif_path, glif_data)?;
     Ok(())
+}
+
+fn process_node(node: &usvg::Node, glyph: &mut Glyph, svg_height: f32, descent: f32, scale: f32) {
+    match *node {
+        Node::Path(ref path) => {
+            let contours = process_path(path, svg_height, descent, scale);
+            if !glyph.contours.is_empty() {
+                glyph.contours.extend(contours);
+            } else {
+                glyph.contours = contours;
+            }
+        }
+        Node::Text(ref text) => {
+            if let Some(anchor) = process_text_as_anchor(text, node, svg_height, descent, scale) {
+                glyph.anchors.push(anchor);
+            }
+        }
+        Node::Group(ref group) => {
+            for child in group.children() {
+                process_node(child, glyph, svg_height, descent, scale);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn process_path(path: &usvg::Path, svg_height: f32, descent: f32, scale: f32) -> Vec<Contour> {
@@ -231,6 +248,35 @@ fn process_path(path: &usvg::Path, svg_height: f32, descent: f32, scale: f32) ->
     contours
 }
 
+fn process_text_as_anchor(
+    text: &usvg::Text,
+    node: &usvg::Node,
+    svg_height: f32,
+    descent: f32,
+    scale: f32,
+) -> Option<Anchor> {
+    // Get the text content as the anchor name
+    let mut anchor_name = String::new();
+    for chunk in text.chunks() {
+        anchor_name.push_str(chunk.text());
+    }
+
+    if anchor_name.is_empty() {
+        return None;
+    }
+
+    // Get position from transform
+
+    // Check parent for transform
+    let transform = node.abs_transform();
+    let x = transform.tx;
+    let y = transform.ty;
+
+    // Convert to UFO coordinates
+    let (ufo_x, ufo_y) = svg_to_ufo(x, y, svg_height, descent, scale);
+    let anchor_name = Name::new(anchor_name.as_str()).unwrap();
+    Some(Anchor::new(ufo_x, ufo_y, Some(anchor_name), None, None))
+}
 fn svg_to_ufo(sx: f32, sy: f32, svg_height: f32, descent: f32, scale: f32) -> (f64, f64) {
     // Flip Y (SVG origin is top-left; UFO origin baseline is bottom-left)
     let x = sx * scale;
