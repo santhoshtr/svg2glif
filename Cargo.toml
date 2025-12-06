@@ -1,0 +1,10 @@
+[package]
+name = "svg2glif"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+usvg = "0.45"        # parse SVG path data (adjust version as needed)
+quick-xml = "0.38"   # write glif XML
+anyhow = "1.0"
+clap = { version = "4", features = ["derive"] } # optional CLI
