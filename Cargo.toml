@@ -2,9 +2,22 @@
 name = "svg2glif"
 version = "0.1.0"
 edition = "2024"
+description = "Convert SVG to UFO glif file"
+keywords = ["fonts", "typedesign", "svg","ufo"]
+repository = "https://github.com/santhoshtr/svg2glif"
+license = "MIT"
+authors = ["Santhosh Thottingal <santhosh.thottingal@gmail.com>"]
 
 [dependencies]
-usvg = "0.45"        # parse SVG path data (adjust version as needed)
-quick-xml = "0.38"   # write glif XML
+usvg = "0.45"
 anyhow = "1.0"
-clap = { version = "4", features = ["derive"] } # optional CLI
+norad = {version="0.17", features = ["kurbo"]}
+clap = { version = "4.5", features = ["derive"] }
+
+[[bin]]
+name = "svg2glif"
+path = "src/bin/main.rs"
+
+[lib]
+name = "svg2glif"
+path = "src/lib.rs"
