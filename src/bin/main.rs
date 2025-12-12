@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
+use std::time::Instant;
 use svg2glif::{ConversionConfig, convert_svg_to_glif_file};
 
 /// Convert SVG glyphs to UFO GLIF format
@@ -37,8 +38,13 @@ fn main() -> Result<()> {
     if let Some(unicode) = args.unicode {
         config = config.with_unicode(unicode);
     }
-
+    let start = Instant::now();
     convert_svg_to_glif_file(&args.input, &args.output, &config)?;
-    println!("Wrote glif to {}", args.output.display());
+    let elapsed = start.elapsed();
+    println!(
+        "Wrote glif to {} (took {:.2?})",
+        args.output.display(),
+        elapsed
+    );
     Ok(())
 }
