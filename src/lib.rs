@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use norad::{Anchor, Codepoints, Contour, ContourPoint, Glyph, Name, PointType};
 use std::fs;
 use std::path::Path;
-use usvg::Node;
+use std::str::FromStr;
+use svgtypes::{Length, LengthUnit, SimplePathSegment, SimplifyingPathParser, Transform};
 
 /// Configuration for SVG to GLIF conversion
 pub struct ConversionConfig {
@@ -69,14 +70,12 @@ pub fn convert_svg_string_to_glyph(
     svg_path: &Path,
     config: &ConversionConfig,
 ) -> Result<Glyph> {
-    let mut options = usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
-    let rtree = usvg::Tree::from_str(svg_data, &options).context("parsing svg")?;
+    let doc = roxmltree::Document::parse(svg_data).context("parsing svg")?;
+    let root = doc.root_element();
 
     // Get SVG dimensions
-    let svg_size = rtree.size();
-    let svg_width: f32 = svg_size.width();
-    let svg_height: f32 = svg_size.height();
+    let svg_width = parse_length(root.attribute("width").unwrap_or("100"))?;
+    let svg_height = parse_length(root.attribute("height").unwrap_or("100"))?;
 
     // Scale to font units
     let scale = config.em_size / svg_height;
@@ -104,10 +103,15 @@ pub fn convert_svg_string_to_glyph(
         glyph.codepoints = codepoints;
     }
 
-    // Process paths
-    for node in rtree.root().children() {
-        process_node(node, &mut glyph, svg_height, config.descent, scale);
-    }
+    // Process nodes
+    process_svg_node(
+        &root,
+        &mut glyph,
+        svg_height,
+        config.descent,
+        scale,
+        &Transform::default(),
+    )?;
 
     Ok(glyph)
 }
@@ -140,67 +144,175 @@ pub fn convert_svg_to_glif_file(
     Ok(())
 }
 
-fn process_node(node: &usvg::Node, glyph: &mut Glyph, svg_height: f32, descent: f32, scale: f32) {
-    match *node {
-        Node::Path(ref path) => {
-            let contours = process_path(path, svg_height, descent, scale);
-            if !glyph.contours.is_empty() {
-                glyph.contours.extend(contours);
-            } else {
-                glyph.contours = contours;
-            }
-        }
-        Node::Text(ref text) => {
-            if let Some(anchor) = process_text_as_anchor(text, node, svg_height, descent, scale) {
-                glyph.anchors.push(anchor);
-            }
-        }
-        Node::Group(ref group) => {
-            for child in group.children() {
-                process_node(child, glyph, svg_height, descent, scale);
-            }
-        }
-        _ => {}
+fn multiply(ts1: &Transform, ts2: &Transform) -> Transform {
+    Transform {
+        a: ts1.a * ts2.a + ts1.c * ts2.b,
+        b: ts1.b * ts2.a + ts1.d * ts2.b,
+        c: ts1.a * ts2.c + ts1.c * ts2.d,
+        d: ts1.b * ts2.c + ts1.d * ts2.d,
+        e: ts1.a * ts2.e + ts1.c * ts2.f + ts1.e,
+        f: ts1.b * ts2.e + ts1.d * ts2.f + ts1.f,
     }
 }
 
-fn process_path(path: &usvg::Path, svg_height: f32, descent: f32, scale: f32) -> Vec<Contour> {
+fn apply_transform(transform: &Transform, x: f32, y: f32) -> (f32, f32) {
+    let new_x = transform.a as f32 * x + transform.c as f32 * y + transform.e as f32;
+    let new_y = transform.b as f32 * x + transform.d as f32 * y + transform.f as f32;
+    (new_x, new_y)
+}
+
+fn process_svg_node(
+    node: &roxmltree::Node,
+    glyph: &mut Glyph,
+    svg_height: f32,
+    descent: f32,
+    scale: f32,
+    parent_transform: &Transform,
+) -> Result<()> {
+    // Compute current transform
+    let current_transform = if let Some(transform_str) = node.attribute("transform") {
+        let transform = Transform::from_str(transform_str).context("parsing transform")?;
+        multiply(parent_transform, &transform)
+    } else {
+        *parent_transform
+    };
+
+    match node.tag_name().name() {
+        "path" => {
+            if let Some(d) = node.attribute("d") {
+                let contours =
+                    process_path_data(d, svg_height, descent, scale, &current_transform)?;
+                if !glyph.contours.is_empty() {
+                    glyph.contours.extend(contours);
+                } else {
+                    glyph.contours = contours;
+                }
+            }
+        }
+        "text" => {
+            if let Some(anchor) =
+                process_text_as_anchor(node, svg_height, descent, scale, &current_transform)
+            {
+                glyph.anchors.push(anchor);
+            }
+        }
+        "g" | "svg" => {
+            // Process children
+            for child in node.children() {
+                if child.is_element() {
+                    process_svg_node(
+                        &child,
+                        glyph,
+                        svg_height,
+                        descent,
+                        scale,
+                        &current_transform,
+                    )?;
+                }
+            }
+        }
+        _ => {
+            // Process children for unknown elements too
+            for child in node.children() {
+                if child.is_element() {
+                    process_svg_node(
+                        &child,
+                        glyph,
+                        svg_height,
+                        descent,
+                        scale,
+                        &current_transform,
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_length(length_str: &str) -> Result<f32> {
+    let length = Length::from_str(length_str).context("parsing length")?;
+    match length.unit {
+        LengthUnit::None | LengthUnit::Px => Ok(length.number as f32),
+        _ => Err(anyhow!("unsupported length unit: {:?}", length.unit)),
+    }
+}
+
+fn process_path_data(
+    path_data: &str,
+    svg_height: f32,
+    descent: f32,
+    scale: f32,
+    transform: &Transform,
+) -> Result<Vec<Contour>> {
     let mut contours = Vec::new();
     let mut current_contour: Vec<ContourPoint> = Vec::new();
-    let path_data: &usvg::tiny_skia_path::Path = path.data();
-    let segments: usvg::tiny_skia_path::PathSegmentsIter<'_> = path_data.segments();
 
-    for seg in segments {
-        match seg {
-            usvg::tiny_skia_path::PathSegment::MoveTo(p) => {
+    // Use SimplifyingPathParser - all coordinates are absolute!
+    // This automatically handles:
+    // - Relative to absolute conversion
+    // - H/V line to LineTo conversion
+    // - SmoothCurveTo control point reflection
+    // - Arc to Bezier curve conversion
+    for segment in SimplifyingPathParser::from(path_data) {
+        let segment = segment.context("parsing path segment")?;
+
+        match segment {
+            SimplePathSegment::MoveTo { x, y } => {
                 // Start new contour
                 if !current_contour.is_empty() {
                     contours.push(Contour::new(current_contour, None));
                     current_contour = Vec::new();
                 }
-                let (x, y) = svg_to_ufo(p.x, p.y, svg_height, descent, scale);
-                current_contour.push(ContourPoint::new(x, y, PointType::Curve, true, None, None));
-            }
-            usvg::tiny_skia_path::PathSegment::LineTo(p) => {
-                let (x, y) = svg_to_ufo(p.x, p.y, svg_height, descent, scale);
-                current_contour.push(ContourPoint::new(x, y, PointType::Line, false, None, None));
-            }
-            usvg::tiny_skia_path::PathSegment::CubicTo(p1, p2, p) => {
-                // Add two off-curve control points
-                let (cx1, cy1) = svg_to_ufo(p1.x, p1.y, svg_height, descent, scale);
+                let (tx, ty) = apply_transform(transform, x as f32, y as f32);
+                let (ux, uy) = svg_to_ufo(tx, ty, svg_height, descent, scale);
                 current_contour.push(ContourPoint::new(
-                    cx1,
-                    cy1,
+                    ux,
+                    uy,
+                    PointType::Curve,
+                    true,
+                    None,
+                    None,
+                ));
+            }
+            SimplePathSegment::LineTo { x, y } => {
+                let (tx, ty) = apply_transform(transform, x as f32, y as f32);
+                let (ux, uy) = svg_to_ufo(tx, ty, svg_height, descent, scale);
+                current_contour.push(ContourPoint::new(
+                    ux,
+                    uy,
+                    PointType::Line,
+                    false,
+                    None,
+                    None,
+                ));
+            }
+            SimplePathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
+                // Add two off-curve control points
+                let (tx1, ty1) = apply_transform(transform, x1 as f32, y1 as f32);
+                let (ux1, uy1) = svg_to_ufo(tx1, ty1, svg_height, descent, scale);
+                current_contour.push(ContourPoint::new(
+                    ux1,
+                    uy1,
                     PointType::OffCurve,
                     false,
                     None,
                     None,
                 ));
 
-                let (cx2, cy2) = svg_to_ufo(p2.x, p2.y, svg_height, descent, scale);
+                let (tx2, ty2) = apply_transform(transform, x2 as f32, y2 as f32);
+                let (ux2, uy2) = svg_to_ufo(tx2, ty2, svg_height, descent, scale);
                 current_contour.push(ContourPoint::new(
-                    cx2,
-                    cy2,
+                    ux2,
+                    uy2,
                     PointType::OffCurve,
                     false,
                     None,
@@ -208,25 +320,27 @@ fn process_path(path: &usvg::Path, svg_height: f32, descent: f32, scale: f32) ->
                 ));
 
                 // Add on-curve point
-                let (px, py) = svg_to_ufo(p.x, p.y, svg_height, descent, scale);
+                let (tx, ty) = apply_transform(transform, x as f32, y as f32);
+                let (ux, uy) = svg_to_ufo(tx, ty, svg_height, descent, scale);
                 current_contour.push(ContourPoint::new(
-                    px,
-                    py,
+                    ux,
+                    uy,
                     PointType::Curve,
-                    true, // smooth
+                    true,
                     None,
                     None,
                 ));
             }
-            usvg::tiny_skia_path::PathSegment::Close => {
+            SimplePathSegment::Quadratic { .. } => {
+                // Skip quadratic curves as they're not supported in UFO/GLIF
+                // If needed, they could be converted to cubic Bezier curves
+            }
+            SimplePathSegment::ClosePath => {
                 // Finish current contour
                 if !current_contour.is_empty() {
                     contours.push(Contour::new(current_contour, None));
                     current_contour = Vec::new();
                 }
-            }
-            usvg::tiny_skia_path::PathSegment::QuadTo(_, _) => {
-                // Skip quadratic curves as requested
             }
         }
     }
@@ -248,38 +362,42 @@ fn process_path(path: &usvg::Path, svg_height: f32, descent: f32, scale: f32) ->
         }
     }
 
-    contours
+    Ok(contours)
 }
 
 fn process_text_as_anchor(
-    text: &usvg::Text,
-    node: &usvg::Node,
+    node: &roxmltree::Node,
     svg_height: f32,
     descent: f32,
     scale: f32,
+    transform: &Transform,
 ) -> Option<Anchor> {
     // Get the text content as the anchor name
-    let mut anchor_name = String::new();
-    for chunk in text.chunks() {
-        anchor_name.push_str(chunk.text());
-    }
+    let anchor_name = node.text()?;
 
-    if anchor_name.is_empty() {
+    if anchor_name.trim().is_empty() {
         return None;
     }
 
-    // Get position from transform
+    // Get position from x, y attributes (default to 0, 0)
+    let x = node
+        .attribute("x")
+        .and_then(|s| parse_length(s).ok())
+        .unwrap_or(0.0);
+    let y = node
+        .attribute("y")
+        .and_then(|s| parse_length(s).ok())
+        .unwrap_or(0.0);
 
-    // Check parent for transform
-    let transform = node.abs_transform();
-    let x = transform.tx;
-    let y = transform.ty;
+    // Apply transform
+    let (tx, ty) = apply_transform(transform, x, y);
 
     // Convert to UFO coordinates
-    let (ufo_x, ufo_y) = svg_to_ufo(x, y, svg_height, descent, scale);
-    let anchor_name = Name::new(anchor_name.as_str()).unwrap();
+    let (ufo_x, ufo_y) = svg_to_ufo(tx, ty, svg_height, descent, scale);
+    let anchor_name = Name::new(anchor_name.trim()).ok()?;
     Some(Anchor::new(ufo_x, ufo_y, Some(anchor_name), None, None))
 }
+
 fn svg_to_ufo(sx: f32, sy: f32, svg_height: f32, descent: f32, scale: f32) -> (f64, f64) {
     // Flip Y (SVG origin is top-left; UFO origin baseline is bottom-left)
     let x = sx * scale;

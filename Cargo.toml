@@ -9,10 +9,11 @@ license = "MIT"
 authors = ["Santhosh Thottingal <santhosh.thottingal@gmail.com>"]
 
 [dependencies]
-usvg = "0.45"
 anyhow = "1.0"
 norad = {version="0.17", features = ["kurbo"]}
 clap = { version = "4.5", features = ["derive"] }
+roxmltree = "0.21"
+svgtypes = "0.16"
 
 [[bin]]
 name = "svg2glif"

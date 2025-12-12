@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Instant;
-use svg2glif::{ConversionConfig, convert_svg_to_glif_file};
+use svg2glif::{convert_svg_to_glif_file, ConversionConfig};
 
 /// Convert SVG glyphs to UFO GLIF format
 #[derive(Parser, Debug)]
