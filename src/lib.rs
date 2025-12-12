@@ -12,6 +12,8 @@ pub struct ConversionConfig {
     pub descent: f32,
     /// Optional Unicode codepoint in hex format
     pub unicode: Option<String>,
+    /// Optional name for the glyph, if not given, filename will be used.
+    pub name: Option<String>,
 }
 
 impl ConversionConfig {
@@ -21,6 +23,7 @@ impl ConversionConfig {
             em_size,
             descent,
             unicode: None,
+            name: None,
         }
     }
 
@@ -80,10 +83,10 @@ pub fn convert_svg_string_to_glyph(
     let advance_width = (svg_width * scale).round();
     let advance_height = (svg_height * scale).round();
 
-    // Get glyph name from filename
-    let glyph_name = svg_path
-        .file_stem()
-        .and_then(|s| s.to_str())
+    let glyph_name = config
+        .name
+        .as_deref()
+        .or_else(|| svg_path.file_stem().and_then(|s| s.to_str()))
         .unwrap_or("svgglyph")
         .to_string();
 
