@@ -33,6 +33,12 @@ impl ConversionConfig {
         self.unicode = Some(unicode);
         self
     }
+
+    /// Set the name
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
 }
 
 /// Convert an SVG file to a GLIF glyph
